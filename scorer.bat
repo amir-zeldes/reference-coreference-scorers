@@ -16,7 +16,7 @@ goto endofperl
 BEGIN {
     $d = $0;
     $d =~ s/\/[^\/][^\/]*$//g;
-    push(@INC, $d."/lib");
+    push(@INC, "./lib");
 }
 
 use strict;
@@ -47,7 +47,7 @@ if (@ARGV < 3) {
 }
 
 my $metric = shift (@ARGV);
-if ($metric !~ /^(muc|bcub|ceafm|ceafe|all)/i) {
+if ($metric !~ /^(muc|bcub|ceafm|ceafe|plink|all)/i) {
   print "Invalid metric\n";
   exit;
 }
@@ -60,7 +60,12 @@ if ($metric eq 'all') {
   }
 }
 else {
-  &CorScorer::Score( $metric, @ARGV );
+  if ($metric ne 'plink'){
+    &CorScorer::Score( $metric, @ARGV );
+  }
+  else{
+    &CorScorer::ScorePlink( $metric, @ARGV );
+  }
 }
 
 __END__

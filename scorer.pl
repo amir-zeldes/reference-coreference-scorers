@@ -41,7 +41,7 @@ use: scorer.pl <metric> <keys_file> <response_file> [name]
 }
 
 my $metric = shift(@ARGV);
-if ($metric !~ /^(muc|bcub|ceafm|ceafe|blanc|all)/i) {
+if ($metric !~ /^(muc|bcub|ceafm|ceafe|blanc|plink|all)/i) {
   print "Invalid metric\n";
   exit;
 }
@@ -53,6 +53,11 @@ if ($metric eq 'all') {
   }
 }
 else {
+	if ($metric ne 'plink'){
   &CorScorer::Score($metric, @ARGV);
+  }
+  else{
+  &CorScorer::ScorePlink($metric, @ARGV);
+  }
 }
 

@@ -23,9 +23,15 @@ package CorScorer;
 #
 # Revised in March, 2014 by Sameer Pradhan (sameer.pradhan <at> childrens.harvard.edu)
 # to implement the BLANC metric for predicted mentions
+#
+# Additions in May, 2016 by Amir Zeldes (amir.zeldes <at> georgetown.edu)
+# to add p-link metric, implementing a partitioned version of the link-based MUC score.
+# This metric assigns separate scores to regions of a document marked in the penultimate column.
+# For more details, see: 
+# Zeldes, A. & Simonson, D. 2016. Different flavors of GUM: Evaluating genre and sentence type effects on multilayer corpus annotation quality. 
+# In Proceedings of the 10th Linguistic Annotation Workshop (LAW X). Berlin.
 
-
-use strict;
+#use strict;
 use Algorithm::Munkres;
 use Data::Dumper;
 
@@ -33,17 +39,19 @@ use Data::Dumper;
 use Math::Combinatorics;
 use Cwd;
 
-our $VERSION = '8.01';
+our $VERSION = '8.1';
 print "version: " . $VERSION . " " . Cwd::realpath(__FILE__) . "\n";
 
 ##
+# 8.1 Added p-link metric implementation (see Zeldes & Simonson 2016 above). 
+
 # 8.01 fixed a bug that crashed the the BLANC scoring when duplicate
 #      (potentially singleton) mentions were present in the
 #      response. as part of the fix, wee will allow a maximum of 10
 #      duplicate mentions in response, but if there are more, than it
 #      is a sign of a systematic error/manipulation and we will refuse
 #      to score that run.
-
+#
 #  8.0 added code to compute the BLANC metric (generalized for both gold
 #      and system mentions (Luo et al., 2014)
 #
@@ -72,6 +80,7 @@ my $VERBOSE         = 2;
 my $HEAD_COLUMN     = 8;
 my $RESPONSE_COLUMN = -1;
 my $KEY_COLUMN      = -1;
+my $PARTITION_COLUMN      = -2;
 
 # Score. Scores the results of a coreference resolution system
 # Input: Metric, keys file, response file, [name]
@@ -80,6 +89,7 @@ my $KEY_COLUMN      = -1;
 #                bcub: B-Cubed (Bagga and Baldwin, 1998)
 #                ceafm: CEAF (Luo et al, 2005) using mention-based similarity
 #                ceafe: CEAF (Luo et al, 2005) using entity-based similarity
+#                plink: PLinkScorer (Zeldes and Simonson 2016)
 #        keys file: file with expected coreference chains in SemEval format
 #        response file: file with output of coreference system (SemEval format)
 #        name: [optional] the name of the document to score. If name is not
@@ -92,6 +102,9 @@ my $KEY_COLUMN      = -1;
 # Recall = recall_num / recall_den
 # Precision = precision_num / precision_den
 # F1 = 2 * Recall * Precision / (Recall + Precision)
+#
+# A separate version of this function scores plink below
+# 
 sub Score {
   my ($metric, $kFile, $rFile, $name) = @_;
 	our $repeated_mentions = 0;
@@ -177,7 +190,128 @@ sub GetIndex {
   return $ind->{$i};
 }
 
+sub ScorePlink {
+  my ($metric, $kFile, $rFile, $name) = @_;
+	our $repeated_mentions = 0;
+
+  my %idenTotals =
+    (recallDen => 0, recallNum => 0, precisionDen => 0, precisionNum => 0);
+  my ($acumNR, $acumDR, $acumNP, $acumDP) = (0, 0, 0, 0);
+  my ($acumPartitScore, $acumPartKeyScore, $acumPartRespScore)= ((),());
+
+  if (defined($name) && $name ne 'none') {
+    print "$name:\n" if ($VERBOSE);
+    my $keys     = GetCoreferenceWithPartitions($kFile, $KEY_COLUMN, $PARTITION_COLUMN,     $name);
+    my $response = GetCoreferenceWithPartitions($rFile, $RESPONSE_COLUMN, $PARTITION_COLUMN, $name);
+	
+    my (
+      $keyChains, $keyChainsWithSingletonsFromResponse,
+      $responseChains, $responseChainsWithoutMentionsNotInKey,
+      $keyChainsOrig, $responseChainsOrig, $keyPartitions, $responsePartitions
+    ) = IdentifMentionsWithPartitions($keys, $response, \%idenTotals);
+	
+    ($acumNR, $acumDR, $acumNP, $acumDP, $partition_score, $part_key_score, $part_resp_score) = EvalWithPartitions(
+      $metric,                                $keyChains,
+      $keyChainsWithSingletonsFromResponse,   $responseChains,
+      $responseChainsWithoutMentionsNotInKey, $keyChainsOrig,
+      $responseChainsOrig, $keyPartitions, $responsePartitions
+    );
+  }
+  else {
+    my $kIndexNames = GetFileNames($kFile);
+    my $rIndexNames = GetFileNames($rFile);
+
+    $VERBOSE = 0 if ($name eq 'none');
+    foreach my $iname (keys(%{$kIndexNames})) {
+      my $keys =
+        GetCoreferenceWithPartitions($kFile, $KEY_COLUMN, $PARTITION_COLUMN,$iname, $kIndexNames->{$iname});
+      my $response = GetCoreferenceWithPartitions($rFile, $RESPONSE_COLUMN, $PARTITION_COLUMN,$iname,
+        $rIndexNames->{$iname});
+
+      print "$iname:\n" if ($VERBOSE);
+      my (
+        $keyChains,      $keyChainsWithSingletonsFromResponse,
+        $responseChains, $responseChainsWithoutMentionsNotInKey,
+        $keyChainsOrig,  $responseChainsOrig, $keyPartitions, $responsePartitions
+      ) = IdentifMentionsWithPartitions($keys, $response, \%idenTotals);
+      my ($nr, $dr, $np, $dp, $partition_score, $part_key_score, $part_resp_score) = EvalWithPartitions(
+        $metric,                                $keyChains,
+        $keyChainsWithSingletonsFromResponse,   $responseChains,
+        $responseChainsWithoutMentionsNotInKey, $keyChainsOrig,
+        $responseChainsOrig, $keyPartitions, $responsePartitions
+      );
+
+      $acumNR += $nr;
+      $acumDR += $dr;
+      $acumNP += $np;
+      $acumDP += $dp;
+	  while( my( $key, $value ) = each %partition_score ){
+	  		if (exists($acumPartitScore{$key})){
+				$acumPartitScore{$key} += $value;
+			}
+			else{
+				$acumPartitScore{$key} = $value;
+			}
+		}
+	  while( my( $key, $value ) = each %part_key_score){
+	  		if (exists($acumPartKeyScore{$key})){
+				$acumPartKeyScore{$key} += $value;
+			}
+			else{
+				$acumPartKeyScore{$key} = $value;
+			}
+		}
+	  while( my( $key, $value ) = each %part_resp_score){
+	  		if (exists($acumPartRespScore{$key})){
+				$acumPartRespScore{$key} += $value;
+			}
+			else{
+				$acumPartRespScore{$key} = $value;
+			}
+		}
+    }
+  }
+
+  if ($VERBOSE || $name eq 'none') {
+    print "\n====== TOTALS =======\n";
+    print "Identification of Mentions: ";
+    ShowRPF(
+      $idenTotals{recallNum},    $idenTotals{recallDen},
+      $idenTotals{precisionNum}, $idenTotals{precisionDen}
+    );
+    print "Coreference: ";
+    ShowRPF($acumNR, $acumDR, $acumNP, $acumDP);
+  }
+	print "Partitions totals: \n";
+	  while( my( $key, $value ) = each %acumPartitScore ){
+		print "$key\t$value\n";
+	  }
+	print "Key partitions totals: \n";
+	  while( my( $key, $value ) = each %acumPartKeyScore){
+		print "$key\t$value\n";
+	  }
+	print "Response partitions totals: \n";
+	  while( my( $key, $value ) = each %acumPartRespScore){
+		print "$key\t$value\n";
+	  }
+	
+  return ($acumNR, $acumDR, $acumNP, $acumDP);
+}
+
+sub GetIndex {
+  my ($ind, $i) = @_;
+  if (!defined($ind->{$i})) {
+    my $n = $ind->{nexti} || 0;
+    $ind->{$i} = $n;
+    $n++;
+    $ind->{nexti} = $n;
+  }
+
+  return $ind->{$i};
+}
+
 # Get the coreference information from column $column of the file $file
+# Partition correct results for tallying by column $partition
 # If $name is defined, only keys between "#begin document $name" and
 # "#end file $name" are taken.
 # The output is an array of entites, where each entity is an array
@@ -193,6 +327,8 @@ sub GetIndex {
 # if $name is not specified, the output is a hash including each file
 # found in the document:
 # $coref{$file} = \@entities
+#
+# A separate version with partitions for plink follows the normal function
 sub GetCoreference {
   my ($file, $column, $name, $pos) = @_;
   my %coref;
@@ -291,6 +427,148 @@ sub GetCoreference {
           else {
             die
 "Detected the end of a mention [$numberie]($ie) without begin (?,$lnumber)";
+          }
+          print "+mention (entity $ie): ($start,$lnumber)\n" if ($VERBOSE > 2);
+
+        }
+      }
+      $lnumber++;
+    }
+
+    # verbose
+    if ($VERBOSE > 1) {
+      print "File $fName:\n";
+      for (my $e = 0 ; $e < scalar(@entities) ; $e++) {
+        print "Entity $e:";
+        foreach my $mention (@{$entities[$e]}) {
+          print " ($mention->[0],$mention->[1])";
+        }
+        print "\n";
+      }
+    }
+
+    $coref{$fName} = \@entities;
+  } while (!$getout && !eof(F));
+
+  if (defined($name)) {
+    return $coref{$name};
+  }
+  return \%coref;
+}
+
+sub GetCoreferenceWithPartitions {
+  my ($file, $column, $partition, $name, $pos) = @_;
+  my %coref;
+  my %ind;
+
+  open(F, $file) || die "Can not open $file: $!";
+  if ($pos) {
+    seek(F, $pos, 0);
+  }
+  my $fName;
+  my $getout = 0;
+  do {
+    # look for the begin of a file
+    while (my $l = <F>) {
+      chomp($l);
+      $l =~ s/\r$//;    # m$ format jokes
+      if ($l =~ /^\#\s*begin document (.*?)$/) {
+        if (defined($name)) {
+          if ($name eq $1) {
+            $fName  = $name;
+            $getout = 1;
+            last;
+          }
+        }
+        else {
+          $fName = $1;
+          last;
+        }
+      }
+    }
+    print "====> $fName:\n" if ($VERBOSE > 1);
+
+    # Extract the keys from the file until #end is found
+    my $lnumber = 0;
+    my @entities;
+    my @half;
+    my @head;
+    my @sentId;
+    while (my $l = <F>) {
+      chomp($l);
+			$l =~ s/^\s+$//;
+      next if ($l eq '');
+      if ($l =~ /\#\s*end document/) {
+        foreach my $h (@half) {
+          if (defined($h) && @$h) {
+		     foreach my $opening (sort keys %opens){
+				if (!(exists($closes{$opening}))){ 
+            die "Error: some mentions in the document $opening do not close\n";
+				}
+				else{
+					print ": ".$opening ." : $closes{$opening}\n";
+				}
+			 }
+			 
+            die "Error: some mentions in the document do not close\n";
+          }
+        }
+        last;
+      }
+      my @columns = split(/\t/, $l);
+      my $cInfo = $columns[$column];
+      my $partitionInfo = $columns[$partition];
+      push(@head,   $columns[$HEAD_COLUMN]);
+      push(@sentId, $columns[0]);
+      if ($cInfo ne '_') {
+
+        #discard double antecedent
+        while ($cInfo =~ s/\((\d+\+\d)\)//) {
+          print "Discarded ($1)\n" if ($VERBOSE > 1);
+        }
+
+        # one-token mention(s)
+        while ($cInfo =~ s/\((\d+)\)/ /) {
+          my $ie = GetIndex(\%ind, $1);
+          push(@{$entities[$ie]}, [$lnumber, $lnumber, $lnumber, $partitionInfo]);
+          print "+mention (entity $ie): ($lnumber,$lnumber)\n"
+            if ($VERBOSE > 2);
+          exists($opens{$ie}) ? $opens{$ie}+=1 : $opens{$ie}=1;
+          $closes{$ie}+=1;
+        }
+
+        # begin of mention(s)
+        while ($cInfo =~ s/\((\d+)//) {
+          my $ie = GetIndex(\%ind, $1);
+          push(@{$half[$ie]}, $lnumber);
+          print "+init mention (entity $ie): ($lnumber\n" if ($VERBOSE > 2);
+          exists($opens{$ie}) ? $opens{$ie}+=1 : $opens{$ie}=1;
+        }
+
+        # end of mention(s)
+        while ($cInfo =~ s/(\d+)\)//) {
+          my $numberie = $1;
+          my $ie       = GetIndex(\%ind, $numberie);
+          my $start    = pop(@{$half[$ie]});
+          print "+close mention (entity $ie): ($lnumber\n" if ($VERBOSE > 2);
+          exists($closes{$ie}) ? $closes{$ie}+=1 : $closes{$ie}=1;
+          if (defined($start)) {
+            my $inim  = $sentId[$start];
+            my $endm  = $sentId[$lnumber];
+            my $tHead = $start;
+
+        # the token whose head is outside the mention is the head of the mention
+            for (my $t = $start ; $t <= $lnumber ; $t++) {
+              if ($head[$t] < $inim || $head[$t] > $endm) {
+                $tHead = $t;
+                last;
+              }
+            }
+            push(@{$entities[$ie]}, [$start, $lnumber, $tHead,$partitionInfo]);
+          }
+          else {
+            die
+"Detected the end of a mention [$numberie]($ie) without begin (?,$lnumber) and l is: \n" . $l . "\nDone."; 
           }
           print "+mention (entity $ie): ($start,$lnumber)\n" if ($VERBOSE > 2);
 
@@ -570,6 +848,264 @@ sub IdentifMentions {
   );
 }
 
+
+sub IdentifMentionsWithPartitions {
+	my ($keys, $response, $totals) = @_;
+  my @kChains;
+  my @kChainsWithSingletonsFromResponse;
+  my @rChains;
+  my @rChainsWithoutMentionsNotInKey;
+  my %id;
+  my %map;
+  my $idCount = 0;
+  my @assigned;
+  my @kChainsOrig = ();
+  my @rChainsOrig = ();
+  my @kPartitions = ();
+  my @rPartitions = ();
+
+  # for each mention found in keys an ID is generated
+  foreach my $entity (@$keys) {
+    foreach my $mention (@$entity) {
+      if (defined($id{"$mention->[0],$mention->[1]"})) {
+        print "Repeated mention in the key: $mention->[0], $mention->[1] ",
+          $id{"$mention->[0],$mention->[1]"}, $idCount, "\n";
+      }
+      $id{"$mention->[0],$mention->[1]"} = $idCount;
+      $idCount++;
+    }
+  }
+
+  # correct identification: Exact bound limits
+  my $exact = 0;
+  foreach my $entity (@$response) {
+
+    my $i = 0;
+    my @remove;
+		
+    foreach my $mention (@$entity) {
+      if (defined($map{"$mention->[0],$mention->[1]"})) {
+        print "Repeated mention in the response: $mention->[0], $mention->[1] ",
+          $map{"$mention->[0],$mention->[1]"},
+          $id{"$mention->[0],$mention->[1]"},
+          "\n";
+        push(@remove, $i);
+				$main::repeated_mentions++;
+
+				if ($main::repeated_mentions > 30)
+				{
+						print STDERR "Found too many repeated mentions (> 10) in the response, so refusing to score. Please fix the output.\n";
+						exit 1;
+				}
+
+      }
+      elsif (defined($id{"$mention->[0],$mention->[1]"})
+        && !$assigned[$id{"$mention->[0],$mention->[1]"}])
+      {
+        $assigned[$id{"$mention->[0],$mention->[1]"}] = 1;
+        $map{"$mention->[0],$mention->[1]"} =
+          $id{"$mention->[0],$mention->[1]"};
+        $exact++;
+      }
+      $i++;
+    }
+
+    # Remove repeated mentions in the response
+    foreach my $i (sort { $b <=> $a } (@remove)) {
+      splice(@$entity, $i, 1);
+    }
+  }
+
+
+	# now, lets remove any empty elements in the response array after removing
+	# potential repeats
+	my @another_remove = ();
+	my $ii;
+
+	foreach my $eentity (@$response)
+	{
+			if ( @$eentity == 0)
+			{
+					push(@another_remove, $ii);
+			}
+			$ii++;
+	}
+
+	foreach my $iii (sort { $b <=> $a } (@another_remove)) {
+      splice(@$response, $iii, 1);
+	}
+
+
+  # Partial identificaiton: Inside bounds and including the head
+  my $part = 0;
+
+  # Each mention in response not included in keys has a new ID
+  my $mresp = 0;
+  foreach my $entity (@$response) {
+    foreach my $mention (@$entity) {
+      my $ini = $mention->[0];
+      my $end = $mention->[1];
+      if (!defined($map{"$mention->[0],$mention->[1]"})) {
+        $map{"$mention->[0],$mention->[1]"} = $idCount;
+        $idCount++;
+      }
+      $mresp++;
+    }
+  }
+
+  if ($VERBOSE) {
+    print "Total key mentions: " . scalar(keys(%id)) . "\n";
+    print "Total response mentions: " . scalar(keys(%map)) . "\n";
+    print "Strictly correct identified mentions: $exact\n";
+    print "Partially correct identified mentions: $part\n";
+    print "No identified: " . (scalar(keys(%id)) - $exact - $part) . "\n";
+    print "Invented: " . ($idCount - scalar(keys(%id))) . "\n";
+  }
+
+  if (defined($totals)) {
+    $totals->{recallDen}      += scalar(keys(%id));
+    $totals->{recallNum}      += $exact;
+    $totals->{precisionDen}   += scalar(keys(%map));
+    $totals->{precisionNum}   += $exact;
+    $totals->{precisionExact} += $exact;
+    $totals->{precisionPart}  += $part;
+  }
+
+  # The coreference chains arrays are generated again with ID of mentions
+  # instead of token coordenates
+  my $e = 0;
+  foreach my $entity (@$keys) {
+    foreach my $mention (@$entity) {
+      push(@{$kChainsOrig[$e]}, $id{"$mention->[0],$mention->[1]"});
+      push(@{$kChains[$e]},     $id{"$mention->[0],$mention->[1]"});
+	  push(@{$kPartitions[$e]}, $mention->[3]);
+    }
+    $e++;
+  }
+  $e = 0;
+  foreach my $entity (@$response) {
+    foreach my $mention (@$entity) {
+      push(@{$rChainsOrig[$e]}, $map{"$mention->[0],$mention->[1]"});
+      push(@{$rChains[$e]},     $map{"$mention->[0],$mention->[1]"});
+	  push(@{$rPartitions[$e]}, $mention->[3]);
+    }
+    $e++;
+  }
+
+  # In order to use the metrics as in (Cai & Strube, 2010):
+  # 1. Include the non-detected key mentions into the response as singletons
+  # 2. Discard the detected mentions not included in key resolved as singletons
+  # 3a. For computing precision: put twinless system mentions in key
+  # 3b. For computing recall: discard twinless system mentions in response
+
+  my $kIndex = Indexa(\@kChains);
+  my $rIndex = Indexa(\@rChains);
+
+  # 1. Include the non-detected key mentions into the response as singletons
+  my $addkey = 0;
+  if (scalar(keys(%id)) - $exact - $part > 0) {
+    foreach my $kc (@kChains) {
+      foreach my $m (@$kc) {
+        if (!defined($rIndex->{$m})) {
+          push(@rChains, [$m]);
+          push(@rPartitions, [$m]);
+          $addkey++;
+        }
+      }
+    }
+  }
+
+  @kChainsWithSingletonsFromResponse = @kChains;
+  @rChainsWithoutMentionsNotInKey    = [];
+
+  # 2. Discard the detected mentions not included in key resolved as singletons
+  my $delsin = 0;
+
+  if ($idCount - scalar(keys(%id)) > 0) {
+    #foreach my $rc (@rChains) {
+	foreach $index (0..$#rChains) {
+	 my $rc = $rChains[$index];
+	 my $rp = $rPartitions[$index];
+      if (scalar(@$rc) == 1) {
+        if (!defined($kIndex->{$rc->[0]})) {
+		#print "rc zero is ". $rc->[0] ."\n";
+          @$rc = ();
+		  @$rp = ();
+          $delsin++;
+        }
+      }
+    }
+    foreach my $rp (@rPartitions) {
+      if (scalar(@$rp) == 1) {
+        if (!defined($kIndex->{$rp->[0]})) {
+          #@$rp = ();
+          #$delsin++;
+        }
+      }
+    }
+  }
+
+# 3a. For computing precision: put twinless system mentions in key as singletons
+  my $addinv = 0;
+
+  if ($idCount - scalar(keys(%id)) > 0) {
+    foreach my $rc (@rChains) {
+      if (scalar(@$rc) > 1) {
+        foreach my $m (@$rc) {
+          if (!defined($kIndex->{$m})) {
+            push(@kChainsWithSingletonsFromResponse, [$m]);
+            $addinv++;
+          }
+        }
+      }
+    }
+  }
+
+  # 3b. For computing recall: discard twinless system mentions in response
+  my $delsys = 0;
+
+  foreach my $rc (@rChains) {
+    my @temprc;
+    my $i = 0;
+
+    foreach my $m (@$rc) {
+      if (defined($kIndex->{$m})) {
+        push(@temprc, $m);
+        $i++;
+      }
+      else {
+        $delsys++;
+      }
+    }
+
+    if ($i > 0) {
+      push(@rChainsWithoutMentionsNotInKey, \@temprc);
+    }
+  }
+
+  # We clean the empty chains
+  my @newrc;
+  foreach my $rc (@rChains) {
+    if (scalar(@$rc) > 0) {
+      push(@newrc, $rc);
+    }
+  }
+  @rChains = @newrc;
+  my @newrp;
+  foreach my $rp (@rPartitions) {
+    if (scalar(@$rp) > 0) {
+      push(@newrp, $rp);
+    }
+  }
+  @rPartitions = @newrp;  
+  
+  return (
+    \@kChains, \@kChainsWithSingletonsFromResponse,
+    \@rChains, \@rChainsWithoutMentionsNotInKey,
+    \@kChainsOrig, \@rChainsOrig, \@kPartitions, \@rPartitions
+  );
+}
+
 sub Eval {
   my ($scorer, $keys, $keysPrecision, $response, $responseRecall,
     $keyChainsOrig, $responseChainsOrig)
@@ -607,6 +1143,37 @@ sub Indexa {
   }
   return \%index;
 }
+
+sub EvalWithPartitions {
+  my ($scorer, $keys, $keysPrecision, $response, $responseRecall,
+    $keyChainsOrig, $responseChainsOrig, $keyPartitions, $responsePartitions)
+    = @_;
+  $scorer = lc($scorer);
+  my ($nr, $dr, $np, $dp);
+	if ($scorer eq 'plink') {
+    ($nr, $dr, $np, $dp, $partition_score, $part_key_score, $part_resp_score) =
+      PLinkScorer($keys, $keysPrecision, $response, $responseRecall, $keyChainsOrig, $keyPartitions, $responsePartitions);
+	      return ($nr, $dr, $np, $dp, $partition_score, $part_key_score, $part_resp_score);
+  }
+  else {
+    die "Metric $scorer not implemented yet, expecting plink metric for EvalWithPartitions\n";
+  }
+  return ($nr, $dr, $np, $dp);
+}
+
+# Indexes an array of arrays, in order to easily know the position of an element
+sub Indexa {
+  my ($arrays) = @_;
+  my %index;
+
+  for (my $i = 0 ; $i < @$arrays ; $i++) {
+    foreach my $e (@{$arrays->[$i]}) {
+      $index{$e} = $i;
+    }
+  }
+  return \%index;
+}
+
 
 # Consider the "links" within every coreference chain. For example,
 # chain A-B-C-D has 3 links: A-B, B-C and C-D.
@@ -655,6 +1222,158 @@ sub MUCScorer {
 
   ShowRPF($correct, $keylinks, $correct, $reslinks) if ($VERBOSE);
   return ($correct, $keylinks, $correct, $reslinks);
+}
+
+
+# Like MUC, consider the "links" within every coreference chain. For example,
+# chain A-B-C-D has 3 links: A-B, B-C and C-D.
+# Unlike MUC, members of links are assigned a partition based on the penultimate column in the input.
+# Separate scores are calculated for each partition.
+# Recall: num members of correct links / num members of expected links in each partition.
+# Precision: num members of correct links / num members of output links in each partition.
+
+sub PLinkScorer {
+  my ($keys, $keysPrecision, $response, $responseRecall, $keyChainsOrig, $keyPartitions, $responsePartitions) = @_;
+	
+	@temp_resp = @{$response};
+	@temp_parts = @{$responsePartitions};
+	@temp_key = @{$keys};
+	@temp_keyparts = @{$keyPartitions};
+	foreach $index_ent (0..$#temp_resp){
+		@temp_subresp = @{$temp_resp[$index_ent]};
+		@temp_subparts = @{$temp_parts[$index_ent]};		
+	}
+  my $kIndex = Indexa($keys);
+
+  # Calculate correct links
+
+
+  %partition_score=();
+  %part_resp_score=();
+  %part_key_score=();
+	$total_links = 0;
+
+  my $correct = 0;
+  foreach my $index_ent (0..$#temp_resp) {
+	$rEntity = $temp_resp[$index_ent];
+	@temp_subparts = @{$temp_parts[$index_ent]};
+    next if (!defined($rEntity));
+
+    # for each possible pair
+    for (my $i = 0 ; $i < @$rEntity ; $i++) {
+      my $id_i = $rEntity->[$i];
+      for (my $j = $i + 1 ; $j < @$rEntity ; $j++) {
+        my $id_j = $rEntity->[$j];
+        if ( defined($kIndex->{$id_i})
+          && defined($kIndex->{$id_j})
+          && $kIndex->{$id_i} == $kIndex->{$id_j})
+        {
+			# True positive
+          $correct++;
+		  $total_links++;
+		  if (exists($partition_score{$temp_subparts[$i]})){
+			$partition_score{$temp_subparts[$i]}+=0.5;
+		 }
+		 else{
+			$partition_score{$temp_subparts[$i]}=0.5;		 
+		 }
+		  if (exists($partition_score{$temp_subparts[ $j]})){
+			$partition_score{$temp_subparts[$j]}+=0.5;
+		 }
+		 else{
+			$partition_score{$temp_subparts[$j]}=0.5;
+		 }
+          last;
+        }
+      }
+    }
+  }
+
+  print "$_\t".$partition_score{$_} ."\n" foreach (sort keys %partition_score);
+  
+  # Links in key
+  my $keylinks = 0;
+   foreach my $index_ent (0..$#temp_key) {
+	$kEntity = $temp_key[$index_ent];
+	@temp_keysubparts = @{$temp_keyparts[$index_ent]};
+
+    next if (!defined($kEntity));
+    $keylinks += scalar(@$kEntity) - 1 if (scalar(@$kEntity));
+	@copy1 = @temp_keysubparts;
+	@copy2 = @temp_keysubparts;
+	pop @copy1;
+	shift @copy2;
+	
+	foreach $part_index (0..$#copy1){
+		$key_part1 = $copy1[$part_index];
+		$key_part2 = $copy2[$part_index];
+		$modifier=0.5;
+		if (exists($part_key_score{$key_part1})){
+			$part_key_score{$key_part1}+=$modifier;
+		 }
+		 else{
+			$part_key_score{$key_part1}=$modifier;
+		 }
+		if (exists($part_key_score{$key_part2})){
+			$part_key_score{$key_part2}+=$modifier;
+		 }
+		 else{
+			$part_key_score{$key_part2}=$modifier;
+		 }
+	}
+  }
+
+ print "\n\nOut of key types:\n";
+ print "$_\t".$part_key_score{$_} ."\n" foreach (sort keys %part_key_score);
+
+
+  # Links in response
+  my $reslinks = 0;
+  foreach my $index_ent (0..$#temp_resp) {
+	$rEntity = $temp_resp[$index_ent];
+	@temp_respsubparts = @{$temp_parts[$index_ent]};
+	
+    next if (!defined($rEntity));
+    $reslinks += scalar(@$rEntity) - 1 if (scalar(@$rEntity));
+	@copy1 = @temp_respsubparts;
+	@copy2 = @temp_respsubparts;
+	pop @copy1;
+	shift @copy2;
+	
+	foreach $part_index (0..$#copy1){
+		$resp_part1 = $copy1[$part_index];
+		$resp_part2 = $copy2[$part_index];
+
+		$modifier=0.5; # Weight set at 0.5 for both link source and link target correctness
+		if ($resp_part1 !~m/^[0-9]+$/){
+			if (exists($part_resp_score{$resp_part1})){
+				$part_resp_score{$resp_part1}+=$modifier;
+			 }
+			 else{
+				$part_resp_score{$resp_part1}=$modifier;
+			 }
+		}
+		if ($resp_part2 !~m/^[0-9]+$/){
+			if (exists($part_resp_score{$resp_part2})){
+				$part_resp_score{$resp_part2}+=$modifier;
+			 }
+			 else{
+				$part_resp_score{$resp_part2}=$modifier;
+			 }
+		}
+	}
+	
+  }
+
+ print "\n\nAnd response types:\n";
+ print "$_\t".$part_resp_score{$_} ."\n" foreach (sort keys %part_resp_score);
+  print "Total links:" . $total_links . "\n";
+
+  
+  print "Key Links: $keylinks Response Links: $reslinks\n";
+  
+  ShowRPF($correct, $keylinks, $correct, $reslinks) if ($VERBOSE);
+  return ($correct, $keylinks, $correct, $reslinks, $partition_score, $part_key_score, $part_resp_score);
 }
 
 # Compute precision for every mention in the response, and compute
@@ -838,6 +1557,7 @@ sub ShowRPF {
 
 # NEW
 sub ScoreBLANC {
+
   my ($kFile, $rFile, $name) = @_;
   my ($acumNRa, $acumDRa, $acumNPa, $acumDPa) = (0, 0, 0, 0);
   my ($acumNRr, $acumDRr, $acumNPr, $acumDPr) = (0, 0, 0, 0);
