@@ -15,12 +15,12 @@ more details see:
 
   ::
 
-  @InProceedings{ZeldesSimonson2016,
-    author    = {Amir Zeldes and Dan Simonson},
-    title     = {Different Flavors of GUM: Evaluating Genre and Sentence Type Effects on Multilayer Corpus Annotation Quality},
-    booktitle = {Proceedings of the 10th Linguistic Annotation Workshop (LAW X)},
-    year      = {2016}
-      }
+   @InProceedings{ZeldesSimonson2016,
+     author    = {Amir Zeldes and Dan Simonson},
+     title     = {Different Flavors of GUM: Evaluating Genre and Sentence Type Effects on Multilayer Corpus Annotation Quality},
+     booktitle = {Proceedings of the 10th Linguistic Annotation Workshop (LAW X)},
+     year      = {2016}
+     }
 
 
 VERSION
