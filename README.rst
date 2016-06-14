@@ -4,20 +4,35 @@ Reference Coreference Scorer
 DESCRIPTION
 -----------
 
-This is the official implementation of the revised coreference scorer
-used for CoNLL-2011/2012 shared tasks on coreference resolution. It
-addresses issues that prevented the consistent scoring of predicted
-mentions in the past.
+This fork implements the p-link metric (Zeldes & Simonson 2016), which 
+extends the official implementation of the revised coreference scorer
+used for CoNLL-2011/2012 shared tasks on coreference resolution. 
+
+The p-link metric implements a partitioned score based on correct links, 
+similarly to the MUC score, where the penultimate column of the input data 
+defines partitions which are assigned portions of the 'blame' for errors. For 
+more details see:
+
+  ::
+
+  @InProceedings{ZeldesSimonson2016,
+  author    = {Amir Zeldes and Dan Simonson},
+  title     = {Different Flavors of GUM: Evaluating Genre and Sentence Type Effects on Multilayer Corpus Annotation Quality},
+  booktitle = {Proceedings of the 10th Linguistic Annotation Workshop (LAW X)},
+  year      = {2016}
+  }
 
 
 VERSION
 -------
 
-The current stable (official) version for scoring predicted mentions is **v8.01**
+The current stable (official) version for scoring predicted mentions is **v8.01**.
+This fork is currently versioned **v8.1** and is based on the official underying v8.01.
 
 CITATION
 --------
 
+For the original scorer:
 We would appreciate if you cite the paper when you use this scorer as
 some of us are academics or wanting to be academics, and citations
 matter.
@@ -52,7 +67,8 @@ USAGE
      ceafm: CEAF (Luo et al., 2005) using mention-based similarity
      ceafe: CEAF (Luo et al., 2005) using entity-based similarity
      blanc: BLANC (Luo et al., 2014) BLANC metric for gold and predicted mentions
-     all: uses all the metrics to score
+     all: uses all the metrics to score    
+     plink: use partitioned p-link score based on penultimate column partitions
 
      <key>: file with expected coreference chains in CoNLL-2011/2012 format
 
@@ -97,11 +113,13 @@ AUTHORS
 * Sebastian Martschat, sebastian.martschat <at> h-its.org
 * Xiaoqiang Luo, xql <at> google.com
 
+Addition of p-link:
+* Amir Zeldes, amir.zeldes <at> georgetown.edu (p-link)
 
 COPYRIGHT
 ---------
 
   ::
-
+    2016-   Amir Zeldes, amir.zeldes <at> georgetown.edu (p-link)
     2009-2011, Emili Sapena esapena <at> lsi.upc.edu
     2011-      Sameer Pradhan pradhan <at> cemantix.org
